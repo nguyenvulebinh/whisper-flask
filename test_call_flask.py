@@ -1,20 +1,3 @@
-# Whisper decoding with flask
-
-### Install required packages 
-```
-pip install -r requirements.txt
-```
-
-### Run service
-- Choose model you want in ***initialize_model*** function in flask_interface.py file. Default "tiny.en"
-- Run service:
-
-```
-flask --app flask_interface run
-```
-
-### Call service
-```python
 import requests
 import threading
 import random
@@ -38,4 +21,3 @@ if __name__ == "__main__":
     
     for thread in threads:
         thread.join()
-```
