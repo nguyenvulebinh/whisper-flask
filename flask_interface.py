@@ -54,7 +54,7 @@ def use_model(reqs):
         req = reqs[0]
         audio_tensor, prefix, input_language, output_language = req.get_data()
         if not (input_language == output_language or output_language == 'en'):
-            result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate"'}
+            result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(input_language, output_language)}
             req.publish(result)
             return
         result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix, 
@@ -109,7 +109,7 @@ def use_model(reqs):
             for req, audio_tensor, prefix, input_language, output_language \
                     in zip(reqs, audio_tensors, prefixes, input_languages, output_languages):
                 if not (input_language == output_language or output_language == 'en'):
-                    result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate"'}
+                    result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(input_language, output_language)}
                     req.publish(result)
                 else:
                     result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix,
