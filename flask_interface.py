@@ -8,11 +8,11 @@ import threading
 import queue
 import uuid
 import traceback
-# import os
+import os
 import whisper
 from whisper.decoding import decode, DecodingOptions
 from whisper.audio import log_mel_spectrogram, pad_or_trim, SAMPLE_RATE, N_FRAMES, HOP_LENGTH
-# os.environ["CUDA_VISIBLE_DEVICES"]="5"
+os.environ["CUDA_VISIBLE_DEVICES"]=""
 
 host = sys.argv[1]  # 192.168.0.72
 port = sys.argv[2]  # 5051
@@ -28,7 +28,7 @@ def create_unique_list(my_list):
 
 def initialize_model():
     # filename = "/export/data1/workspaces/whisper/model-bin/tiny.en.pt"
-    filename =  "tiny.en" # ["tiny.en","tiny","base.en","base","small.en","small","medium.en","medium","large-v1","large-v2","large"]
+    filename =  "tiny" # ["tiny.en","tiny","base.en","base","small.en","small","medium.en","medium","large-v1","large-v2","large"]
 
     model = whisper.load_model(filename)
     print("ASR initialized")
@@ -53,10 +53,13 @@ def use_model(reqs):
     if len(reqs) == 1:
         req = reqs[0]
         audio_tensor, prefix, input_language, output_language = req.get_data()
-
-        result = model.transcribe(audio_tensor.squeeze(), 
-                          language=input_language,
-                          initial_prompt=prefix)
+        if not (input_language == output_language or output_language == 'en'):
+            result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate"'}
+            req.publish(result)
+            return
+        result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix, 
+                                  task="transcribe" if input_language == output_language else "translate",
+                                  temperature=0)
         hypo = result['text']
         if not hypo.strip().startswith(prefix.strip()):
             hypo = prefix + hypo
@@ -82,14 +85,22 @@ def use_model(reqs):
 
         unique_prefix_list = create_unique_list(prefixes)
         unique_input_languages = create_unique_list(input_languages)
-
-        if len(unique_prefix_list) == 1 and len(unique_input_languages) == 1:
+        unique_output_languages = create_unique_list(output_languages)
+        if len(unique_prefix_list) == 1 and len(unique_input_languages) == 1 and len(unique_output_languages) == 1:
             batch_runnable = True
 
         if batch_runnable:
 
             segments = pad_audios(audio_tensors)
-            hypos = decode(model, segments, DecodingOptions(**{'language': input_languages[0], 'fp16': False, 'prompt': []}))
+            if unique_input_languages[0] == unique_output_languages[0]:
+                hypos = decode(model, segments, DecodingOptions(**{'language': input_languages[0], 'fp16': False, 'prompt': []}))
+            elif unique_output_languages[0] == 'en':
+                hypos = decode(model, segments, DecodingOptions(**{'task': 'translate', 'language': input_languages[0], 'fp16': False, 'prompt': []}))
+            else:
+                for req in reqs:
+                    result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(unique_input_languages[0], unique_output_languages[0])}
+                    req.publish(result)
+                return
 
             for req, hypo in zip(reqs, hypos):
                 result = {"hypo": hypo.text}
@@ -97,12 +108,18 @@ def use_model(reqs):
         else:
             for req, audio_tensor, prefix, input_language, output_language \
                     in zip(reqs, audio_tensors, prefixes, input_languages, output_languages):
-                result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix)
-                hypo = result['text']
-                if not hypo.strip().startswith(prefix.strip()):
-                    hypo = prefix + hypo
-                result = {"hypo": hypo}
-                req.publish(result)
+                if not (input_language == output_language or output_language == 'en'):
+                    result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate"'}
+                    req.publish(result)
+                else:
+                    result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix,
+                                              task="transcribe" if input_language == output_language else "translate",
+                                              temperature=0)
+                    hypo = result['text']
+                    if not hypo.strip().startswith(prefix.strip()):
+                        hypo = prefix + hypo
+                    result = {"hypo": hypo}
+                    req.publish(result)
 
 def run_decoding():
     while True:
