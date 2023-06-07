@@ -195,6 +195,8 @@ def inference(input_language, output_language):
     condition = threading.Condition()
     with condition:
         id = str(uuid.uuid4())
+        if input_language.lower() == 'none':
+            input_language = None
         data = (audio_tensor,prefix,input_language,output_language)
 
         queue_in.put(Priority(priority,id,condition,data))
