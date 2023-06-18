@@ -1,3 +1,5 @@
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"]="0"
 from flask import Flask, request
 import torch
 import numpy as np
@@ -8,17 +10,12 @@ import threading
 import queue
 import uuid
 import traceback
-import os
-import whisper
-from whisper.decoding import decode, DecodingOptions
-from whisper.audio import log_mel_spectrogram, pad_or_trim, SAMPLE_RATE, N_FRAMES, HOP_LENGTH
-os.environ["CUDA_VISIBLE_DEVICES"]=""
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 host = sys.argv[1]  # 192.168.0.72
 port = sys.argv[2]  # 5051
 # host = '0.0.0.0'
-# port = 5000
-
+# port = 5100
 
 app = Flask(__name__)
 
@@ -28,25 +25,43 @@ def create_unique_list(my_list):
 
 def initialize_model():
     # filename = "/export/data1/workspaces/whisper/model-bin/tiny.en.pt"
-    filename =  "tiny" # ["tiny.en","tiny","base.en","base","small.en","small","medium.en","medium","large-v1","large-v2","large"]
-
-    model = whisper.load_model(filename)
+    filename =  "large-v2" # ["tiny.en","tiny","base.en","base","small.en","small","medium.en","medium","large-v1","large-v2","large"]
+    # filename =  "small"
+    # model = whisper.load_model(filename)
+    
+    model_path = "openai/whisper-{}".format(filename)
+    processor = WhisperProcessor.from_pretrained(model_path, cache_dir='./cache')
+    model = WhisperForConditionalGeneration.from_pretrained(model_path, cache_dir='./cache')
+    
     print("ASR initialized")
 
     max_batch_size = 8
 
-    return model, max_batch_size
-
-def pad_audios(list_audios):
-    list_segments = []
-    for audio in list_audios:
-        mel = log_mel_spectrogram(audio.squeeze())
-        segment = pad_or_trim(mel, N_FRAMES).unsqueeze(0)
-        list_segments.append(segment)
+    if torch.cuda.is_available():
+        model = model.cuda()
     
-    return torch.cat(list_segments, dim=0).to(model.device)
+    return (model, processor), max_batch_size
 
 
+def infer_batch(audio_wavs, prefix="", input_language="en", task="transcribe", audio_sample_rate=16000):
+    
+    input_values = torch.cat([processor(item, sampling_rate=audio_sample_rate, return_tensors="pt").input_features for item in audio_wavs], dim=0)
+    
+    forced_decoder_ids = processor.get_decoder_prompt_ids(language=input_language, task=task)
+    if len(prefix) > 0:
+        prompt_ids = processor.get_prompt_ids(prefix).tolist()[1:]
+        for wid in prompt_ids:
+            forced_decoder_ids.append((len(forced_decoder_ids) + 1, wid))
+    
+    # get device based on the model parameters
+    device = next(model.parameters()).device
+    
+    predicted_ids = model.generate(
+        input_values.to(device), 
+        forced_decoder_ids=forced_decoder_ids
+    )
+    text_output_raw = processor.batch_decode(predicted_ids, skip_special_tokens=True)
+    return text_output_raw
 
 def use_model(reqs):
 
@@ -57,18 +72,18 @@ def use_model(reqs):
             result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(input_language, output_language)}
             req.publish(result)
             return
-        result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix, 
-                                  task="transcribe" if input_language == output_language else "translate",
-                                  temperature=0)
-        hypo = result['text']
-        if not hypo.strip().startswith(prefix.strip()):
-            hypo = prefix + hypo
         
+        if input_language == output_language:
+            task = "transcribe"
+        else:
+            task = "translate"
+        
+        hypo = infer_batch(audio_wavs=[audio_tensor], input_language=input_language, task=task, prefix=prefix)[0]
+            
         result = {"hypo": hypo.strip()}
         req.publish(result)
 
     else:
-
         audio_tensors = list()
         prefixes = ['']
         input_languages = list()
@@ -90,35 +105,34 @@ def use_model(reqs):
             batch_runnable = True
 
         if batch_runnable:
-
-            segments = pad_audios(audio_tensors)
             if unique_input_languages[0] == unique_output_languages[0]:
-                hypos = decode(model, segments, DecodingOptions(**{'language': input_languages[0], 'fp16': False, 'prompt': []}))
+                task = "transcribe"
             elif unique_output_languages[0] == 'en':
-                hypos = decode(model, segments, DecodingOptions(**{'task': 'translate', 'language': input_languages[0], 'fp16': False, 'prompt': []}))
+                task = "translate"
             else:
                 for req in reqs:
                     result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(unique_input_languages[0], unique_output_languages[0])}
                     req.publish(result)
                 return
+            hypos = infer_batch(audio_wavs=audio_tensors, input_language=input_languages[0], task=task, prefix=prefixes[0])
 
             for req, hypo in zip(reqs, hypos):
-                result = {"hypo": hypo.text}
+                result = {"hypo": hypo.strip()}
                 req.publish(result)
         else:
             for req, audio_tensor, prefix, input_language, output_language \
-                    in zip(reqs, audio_tensors, prefixes, input_languages, output_languages):
+                    in zip(reqs, audio_tensors, prefixes[1:], input_languages, output_languages):
                 if not (input_language == output_language or output_language == 'en'):
                     result = {"hypo": "", "status":400, "message": 'Wrong option. Perform X->X "transcribe" or X->English "translate". Found {} -> {}'.format(input_language, output_language)}
                     req.publish(result)
                 else:
-                    result = model.transcribe(audio_tensor.squeeze(), language=input_language, initial_prompt=prefix,
-                                              task="transcribe" if input_language == output_language else "translate",
-                                              temperature=0)
-                    hypo = result['text']
-                    if not hypo.strip().startswith(prefix.strip()):
-                        hypo = prefix + hypo
-                    result = {"hypo": hypo}
+                    
+                    if input_language == output_language:
+                        task = "transcribe"
+                    else:
+                        task = "translate"
+                    hypo = infer_batch(audio_wavs=[audio_tensor], input_language=input_language, task=task, prefix=prefix)[0]                    
+                    result = {"hypo": hypo.strip()}
                     req.publish(result)
 
 def run_decoding():
@@ -184,7 +198,7 @@ def inference(input_language, output_language):
         prefix: str = prefix.read().decode("utf-8")
 
     # calculate features corresponding to a torchaudio.load(filepath) call
-    audio_tensor = pcm_s16le_to_tensor(pcm_s16le)
+    audio_tensor = pcm_s16le_to_tensor(pcm_s16le).squeeze()
 
     priority = request.files.get("priority") # can be None
     try:
@@ -196,7 +210,10 @@ def inference(input_language, output_language):
     with condition:
         id = str(uuid.uuid4())
         if input_language.lower() == 'none':
-            input_language = None
+            # Because hf whisper doesn't support None as input language, we use English as default
+            input_language = 'en'
+        if output_language.lower() == 'none':
+            output_language = 'en'
         data = (audio_tensor,prefix,input_language,output_language)
 
         queue_in.put(Priority(priority,id,condition,data))
@@ -217,7 +234,7 @@ def version():
     # return dict or string (as first argument)
     return "Whisper", 200
 
-model, max_batch_size = initialize_model()
+(model, processor), max_batch_size = initialize_model()
 
 queue_in = queue.PriorityQueue()
 dict_out = {}
